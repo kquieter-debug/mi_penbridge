@@ -59,8 +59,14 @@
 #define PEN_SCAN_SINGLE 0x000c0600
 #define PEN_SCAN_DOUBLE 0x000c0601
 
-/* framework triggers shortcuts at >=380ms hold; 450 leaves margin */
-#define SYNTH_HOLD_MS 450
+/* framework triggers shortcuts at >=380ms hold */
+#define SCREENSHOT_HOLD_MS 450
+/*
+ * single click holds PAGE_DOWN long enough for the quick-note mask to
+ * appear (~400ms) and stay while the user writes on it with the pen tip;
+ * writing triggers the note immediately, no write -> mask times out
+ */
+#define QUICKNOTE_HOLD_MS 3000
 
 /* virtual pen: Redmi Smart Pen -> isXiaomiStylus() == 2 */
 #define VIRT_VENDOR  0x1915
@@ -156,11 +162,11 @@ static int find_and_open_pen(char *path_out, size_t outsz) {
     return fd;
 }
 
-/* synthesize a >=380ms hold of key so the framework shortcut timer fires */
-static void synth_press(int ufd, int key) {
+/* synthesize a hold of key so the framework shortcut timer fires */
+static void synth_press(int ufd, int key, int hold_ms) {
     emit(ufd, EV_KEY, key, 1);
     emit(ufd, EV_SYN, SYN_REPORT, 0);
-    usleep(SYNTH_HOLD_MS * 1000);
+    usleep(hold_ms * 1000);
     emit(ufd, EV_KEY, key, 0);
     emit(ufd, EV_SYN, SYN_REPORT, 0);
 }
@@ -187,11 +193,12 @@ static int forward_events(int ufd, int penfd) {
             } else if (ev[i].type == EV_KEY && ev[i].code == KEY_UNKNOWN_LNX &&
                        ev[i].value == 1) {
                 if (last_scan == PEN_SCAN_SINGLE) {
-                    LOGI("single click -> PAGE_DOWN hold (quick note)");
-                    synth_press(ufd, KEY_PAGEDOWN);
+                    LOGI("single click -> PAGE_DOWN hold %dms (quick note mask)",
+                         QUICKNOTE_HOLD_MS);
+                    synth_press(ufd, KEY_PAGEDOWN, QUICKNOTE_HOLD_MS);
                 } else if (last_scan == PEN_SCAN_DOUBLE) {
                     LOGI("double click -> PAGE_UP hold (partial screenshot)");
-                    synth_press(ufd, KEY_PAGEUP);
+                    synth_press(ufd, KEY_PAGEUP, SCREENSHOT_HOLD_MS);
                 }
                 last_scan = 0;
             } else if (ev[i].type == EV_SYN) {
