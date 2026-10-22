@@ -1,3 +1,5 @@
-penbridge
+/penbridge
 *.o
 *.log
+/dist
+*.txt

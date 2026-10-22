@@ -1,0 +1,2 @@
+# Append to vendor/etc/selinux/vendor_file_contexts
+/(odm|vendor|system/vendor)/bin/hw/penbridge      u:object_r:penbridge_exec:s0

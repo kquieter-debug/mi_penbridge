@@ -1,0 +1,8 @@
+# Install to: vendor/etc/init/penbridge.rc
+# Explicit seclabel (matching the vendor_sepolicy_penbridge.cil domain);
+# root because /dev/uinput is system:net_bt_admin 0660 on this device.
+service penbridge /vendor/bin/hw/penbridge
+    class late_start
+    user root
+    group root input
+    seclabel u:r:penbridge:s0
