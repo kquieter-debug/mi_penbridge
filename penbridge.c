@@ -4,13 +4,20 @@
  * Creates a persistent uinput virtual pen recognized by the MIUI stylus
  * stack (VID/PID 0x1915:0x4D81 -> InputDevice.isXiaomiStylus() == 2,
  * name "Redmi Smart Pen" so the Settings page name-based detection also
- * matches) and forwards the physical pen's BLE HID button
- * (Consumer Control interface, usage 0x0C.0600 -> MSC_SCAN 0x000c0600 +
- * KEY_UNKNOWN(240)) as KEY_PAGEDOWN or KEY_PAGEUP.
+ * matches) and translates the physical pen's BLE HID button
+ * (Consumer Control interface, /dev/input/eventN) into the two shortcut
+ * keys the MIUI stylus shortcut manager listens for:
  *
- * The HyperOS key chain then applies as verified:
- *   short press  -> key passes through to the focused app
- *   long press   -> 380ms timer -> quick note mask / partial screenshot
+ *   pen firmware reports the click pattern directly via MSC_SCAN:
+ *     0x000c0600  single click  -> synthetic 450ms KEY_PAGEDOWN hold
+ *                                  (>=380ms framework timer -> quick note)
+ *     0x000c0601  double click  -> synthetic 450ms KEY_PAGEUP hold
+ *                                  (>=380ms framework timer -> partial
+ *                                   screenshot)
+ *
+ * The physical down/up events are consumed by the bridge; only the
+ * synthesized press is emitted, so the framework's 380ms long-press
+ * logic fires exactly once per click gesture.
  *
  * The virtual device stays registered for the lifetime of this process,
  * keeping the stylus settings page in "connected" state. All state is
@@ -46,8 +53,14 @@
 #define PEN_VENDOR   0x17ef
 #define PEN_PRODUCT  0x617f
 #define PEN_NAME_TAG "Consumer Control"
-#define PEN_BTN_SCAN 0x000c0600
 #define KEY_UNKNOWN_LNX 240
+
+/* click patterns reported by pen firmware via MSC_SCAN */
+#define PEN_SCAN_SINGLE 0x000c0600
+#define PEN_SCAN_DOUBLE 0x000c0601
+
+/* framework triggers shortcuts at >=380ms hold; 450 leaves margin */
+#define SYNTH_HOLD_MS 450
 
 /* virtual pen: Redmi Smart Pen -> isXiaomiStylus() == 2 */
 #define VIRT_VENDOR  0x1915
@@ -58,7 +71,6 @@
 #define UINPUT_NODE  "/dev/uinput"
 
 static volatile sig_atomic_t g_run = 1;
-static int g_target_key = KEY_PAGEDOWN;
 
 static void on_signal(int sig) { (void)sig; g_run = 0; }
 
@@ -83,7 +95,8 @@ static int create_virtual_pen(void) {
     ioctl(fd, UI_SET_EVBIT, EV_SYN);
     ioctl(fd, UI_SET_EVBIT, EV_MSC);
     ioctl(fd, UI_SET_MSCBIT, MSC_SCAN);
-    ioctl(fd, UI_SET_KEYBIT, g_target_key);
+    ioctl(fd, UI_SET_KEYBIT, KEY_PAGEDOWN);
+    ioctl(fd, UI_SET_KEYBIT, KEY_PAGEUP);
     ioctl(fd, UI_SET_KEYBIT, BTN_STYLUS);
     ioctl(fd, UI_SET_KEYBIT, BTN_STYLUS2);
 
@@ -143,6 +156,15 @@ static int find_and_open_pen(char *path_out, size_t outsz) {
     return fd;
 }
 
+/* synthesize a >=380ms hold of key so the framework shortcut timer fires */
+static void synth_press(int ufd, int key) {
+    emit(ufd, EV_KEY, key, 1);
+    emit(ufd, EV_SYN, SYN_REPORT, 0);
+    usleep(SYNTH_HOLD_MS * 1000);
+    emit(ufd, EV_KEY, key, 0);
+    emit(ufd, EV_SYN, SYN_REPORT, 0);
+}
+
 /* returns 0 ok, -1 if the device is gone */
 static int forward_events(int ufd, int penfd) {
     struct input_event ev[64];
@@ -162,14 +184,16 @@ static int forward_events(int ufd, int penfd) {
         for (size_t i = 0; i < (size_t)n / sizeof(ev[0]); i++) {
             if (ev[i].type == EV_MSC && ev[i].code == MSC_SCAN) {
                 last_scan = (unsigned int)ev[i].value;
-            } else if (ev[i].type == EV_KEY && ev[i].code == KEY_UNKNOWN_LNX) {
-                if (last_scan == PEN_BTN_SCAN) {
-                    LOGI("pen button %s -> %s",
-                         ev[i].value == 0 ? "up" : "down",
-                         g_target_key == KEY_PAGEDOWN ? "PAGE_DOWN" : "PAGE_UP");
-                    emit(ufd, EV_KEY, g_target_key, ev[i].value);
-                    emit(ufd, EV_SYN, SYN_REPORT, 0);
+            } else if (ev[i].type == EV_KEY && ev[i].code == KEY_UNKNOWN_LNX &&
+                       ev[i].value == 1) {
+                if (last_scan == PEN_SCAN_SINGLE) {
+                    LOGI("single click -> PAGE_DOWN hold (quick note)");
+                    synth_press(ufd, KEY_PAGEDOWN);
+                } else if (last_scan == PEN_SCAN_DOUBLE) {
+                    LOGI("double click -> PAGE_UP hold (partial screenshot)");
+                    synth_press(ufd, KEY_PAGEUP);
                 }
+                last_scan = 0;
             } else if (ev[i].type == EV_SYN) {
                 last_scan = 0;
             }
@@ -183,21 +207,9 @@ int main(int argc, char **argv) {
     char penpath[128] = "";
     int ufd, penfd = -1, ifd, wd = -1;
 
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--key") && i + 1 < argc) {
-            i++;
-            if (!strcmp(argv[i], "page_up") || !strcmp(argv[i], "pu"))
-                g_target_key = KEY_PAGEUP;
-            else if (!strcmp(argv[i], "page_down") || !strcmp(argv[i], "pd"))
-                g_target_key = KEY_PAGEDOWN;
-            else {
-                fprintf(stderr, "usage: %s [--key page_down|page_up]\n", argv[0]);
-                return 1;
-            }
-        } else {
-            fprintf(stderr, "usage: %s [--key page_down|page_up]\n", argv[0]);
-            return 1;
-        }
+    if (argc > 1) {
+        fprintf(stderr, "usage: %s\n", argv[0]);
+        return 1;
     }
 
     signal(SIGINT, on_signal);
@@ -217,9 +229,8 @@ int main(int argc, char **argv) {
         ifd = -1;
     }
 
-    LOGI("penbridge started, target key %s",
-         g_target_key == KEY_PAGEDOWN ? "PAGE_DOWN (long press = quick note)"
-                                      : "PAGE_UP (long press = partial screenshot)");
+    LOGI("penbridge started: single click -> PAGE_DOWN (quick note), "
+         "double click -> PAGE_UP (partial screenshot)");
 
     while (g_run) {
         if (penfd < 0) {
