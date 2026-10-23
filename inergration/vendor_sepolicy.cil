@@ -13,7 +13,12 @@
 (allow penbridge self (capability (dac_override dac_read_search)))
 (allow penbridge input_device (dir (search read)))
 (allow penbridge input_device (chr_file (open read getattr ioctl)))
+;; /dev/uinput: vendor_file_contexts maps it to uinput_device, but ueventd
+;; labels the node uhid_device before vendor contexts load,
+;; so allow both labels.
 (allow penbridge uinput_device (chr_file (open write getattr ioctl)))
+(allow penbridge uhid_device (chr_file (open write getattr ioctl)))
 (allow penbridge self (unix_stream_socket (create connect write read getattr)))
 (allow penbridge logd (unix_stream_socket (connectto)))
 (allow penbridge logdw_socket (sock_file (write open)))
+(allow init penbridge (process (noatsecure)))
